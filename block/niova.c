@@ -1,5 +1,7 @@
 #include "qemu/osdep.h"
-
+#ifndef HAVE_PMULL64
+#define HAVE_PMULL64 0
+#endif
 #include <stdlib.h>
 #include <linux/vfio.h>
 #include "qapi/error.h"
@@ -15,7 +17,7 @@
 #include "block/block_int.h"
 #include "sysemu/replay.h"
 #include "trace.h"
-
+#undef MAX
 #include <niova/common.h>
 #include <niova/nclient.h>
 #include <niova/nclient_private.h>
