@@ -57,6 +57,7 @@ struct NiovaDevState {
 	} stats;
 };
 
+#define NIOVA_OPT_TARGET "target"
 #define NIOVA_OPT_UUID "uuid"
 #define NIOVA_OPT_VDEV "vdev"
 #define NIOVA_OPT_QUEUE_DEPTH "queue-depth"
@@ -66,10 +67,15 @@ static QemuOptsList runtime_opts = {
 	.head = QTAILQ_HEAD_INITIALIZER(runtime_opts.head),
 	.desc = {
 		{
-			.name = NIOVA_OPT_UUID,
+			.name = NIOVA_OPT_TARGET,
 			.type = QEMU_OPT_STRING,
-			.help = "UUID",
+			.help = "Target string (e.g. tcp:uuid:ip:port, unix:..., uuid-only)",
 		},
+        {
+            .name = NIOVA_OPT_UUID,
+            .type = QEMU_OPT_STRING,
+            .help = "Legacy target UUID",
+        },
 		{
 			.name = NIOVA_OPT_VDEV,
 			.type = QEMU_OPT_STRING,
@@ -91,6 +97,15 @@ static QemuOptsList runtime_opts = {
 static void niovadev_parse_filename(const char *filename, QDict *options,
 								   Error **errp)
 {
+
+    // --- New style: tcp:..., unix:..., uuid:... ---
+    if (g_str_has_prefix(filename, "tcp:") ||
+        g_str_has_prefix(filename, "unix:") ||
+        g_str_has_prefix(filename, "uuid:")) {
+        qdict_put_str(options, NIOVA_OPT_TARGET, filename);
+        return;
+    }
+ 
 	int pref = strlen("niova://");
 	if (strlen(filename) <= pref || strncmp(filename, "niova://", pref)) {
 			return;
@@ -170,11 +185,37 @@ static int niovadev_file_open(BlockDriverState *bs, QDict *options, int flags,
 	qemu_opts_absorb_qdict(opts, options, &error_abort);
 
 	NiovaDevState *s = bs->opaque;
-
-	// XXX do these strdups need to be freed?
-	const char *uuid = qemu_opt_get(opts, NIOVA_OPT_UUID);
-	if (uuid)
-		uuid_parse(uuid, s->xopts.npcx_opts.target_uuid);
+    int rc = 0;
+    fprintf(stderr, "DEBUG: target=%s uuid=%s\n",
+        qemu_opt_get(opts, NIOVA_OPT_TARGET),
+        qemu_opt_get(opts, NIOVA_OPT_UUID));
+    
+    // --- New-style target parsing ---
+    const char *target = qemu_opt_get(opts, NIOVA_OPT_TARGET);
+    const char *uuid   = qemu_opt_get(opts, NIOVA_OPT_UUID);
+    if (target) {
+        fprintf(stderr, "DEBUG: using target='%s'\n", target);
+        rc = niova_block_client_parse_target_opt_string(
+            target, &s->xopts.npcx_opts);
+        if (rc) {
+            error_setg(errp, "Failed to parse target string: %s", target);
+            return rc;
+        }
+    } else if (uuid) {
+        fprintf(stderr, "DEBUG: using legacy uuid='%s'\n", uuid);
+    	// XXX do these strdups need to be freed?
+        // const char *uuid = qemu_opt_get(opts, NIOVA_OPT_UUID);
+    	//if (uuid)
+	    rc = uuid_parse(uuid, s->xopts.npcx_opts.target_uuid);
+        if (rc) {
+            error_setg(errp, "Invalid legacy UUID: %s", uuid);
+            return rc;
+        }
+        
+    } else {
+        error_setg(errp, "Either target= or uuid= must be provided");
+         return -EINVAL;
+    }
 
 	const char *vdev = qemu_opt_get(opts, NIOVA_OPT_VDEV);
 	if (vdev)
@@ -183,9 +224,15 @@ static int niovadev_file_open(BlockDriverState *bs, QDict *options, int flags,
 	int qd = qemu_opt_get_number(opts, NIOVA_OPT_QUEUE_DEPTH, 0);
 	if (qd > 0)
 		s->xopts.npcx_opts.queue_depth = qd;
+    
+    fprintf(stderr, "niova: target=%s vdev=%s qd=%d ip=%s port=%d\n",
+            target ? target : "(legacy-uuid)",
+            vdev ? vdev : "(none)",
+            s->xopts.npcx_opts.queue_depth,
+            s->xopts.npcx_opts.net_target_addr,
+            s->xopts.npcx_opts.net_target_port);
 
-	fprintf(stderr, "uuid=%s vdev=%s qd=%d\n", uuid, vdev, qd);
-	int rc = niova_client_setup(s);
+	rc = niova_client_setup(s);
 	if (rc || !s->client) {
 		error_setg(errp, "niova_client_setup(): %s", strerror(-rc));
 		return rc;
@@ -380,9 +427,20 @@ static void niovadev_refresh_filename(BlockDriverState *bs)
 	char uuid_str[UUID_STR_LEN] = {0};
 
 	uuid_unparse(s->xopts.npcx_opts.target_uuid, uuid_str);
-
-	snprintf(bs->exact_filename, sizeof(bs->exact_filename), "niova://%s#%u",
-			 uuid_str, s->xopts.npcx_opts.queue_depth);
+    
+    if (s->xopts.npcx_opts.flags & NIOVA_BLOCK_FLAGS_TCP_SOCKET) {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                 "tcp:%s:%s:%u",
+                 uuid_str,
+                 s->xopts.npcx_opts.net_target_addr,
+                 s->xopts.npcx_opts.net_target_port);
+    } else if (s->xopts.npcx_opts.flags & NIOVA_BLOCK_FLAGS_UNIX_SOCKET) {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                 "unix:%s", uuid_str);
+    } else {
+        snprintf(bs->exact_filename, sizeof(bs->exact_filename),
+                 "uuid:%s", uuid_str);
+    }
 }
 
 static void niovadev_refresh_limits(BlockDriverState *bs, Error **errp)
