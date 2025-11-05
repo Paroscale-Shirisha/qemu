@@ -22,11 +22,18 @@
 #include <niova/nclient.h>
 #include <niova/nclient_private.h>
 
-#define NIOVADEV_DEFAULT_FILE_SIZE 100*((size_t)1 << 30)
+#define NIOVADEV_DEFAULT_FILE_SIZE ((size_t)1 << 40) // 1TB
 #define NIOVADEV_BLOCK_SIZE 4096
 #define NIOVADEV_MAX_XFER_BLKS 1024
 #define NIOVADEV_MAX_IOV 512
 #define NIOVADEV_REQ_OPTS 0
+
+#define NIOVADEV_DEBUG 0
+#if NIOVADEV_DEBUG
+#define DPRINTF(fmt, ...) fprintf(stderr, fmt, ##__VA_ARGS__)
+#else
+#define DPRINTF(fmt, ...) do {} while (0)
+#endif
 
 typedef struct NiovaDevState NiovaDevState;
 
@@ -306,7 +313,7 @@ static coroutine_fn int niovadev_co_rw(bool is_write, BlockDriverState *bs,
 		.ret = -EINPROGRESS,
 	};
 
-	fprintf(stderr, "niova %s 4k sblk %ld 512 nblk %d niov %d iov[0].len %zu\n", is_write ? "write" : "read", start_blk, nblk,
+	DPRINTF("niova %s 4k sblk %ld 512 nblk %d niov %d iov[0].len %zu\n", is_write ? "write" : "read", start_blk, nblk,
 			qiov->niov, qiov->iov[0].iov_len);
 
 	int rc;
@@ -329,11 +336,12 @@ static coroutine_fn int niovadev_co_rw(bool is_write, BlockDriverState *bs,
 
 	cb_data.co = qemu_coroutine_self();
 	AioContext *co_ctx = qemu_coroutine_get_aio_context(cb_data.co);
-	fprintf(stderr, "yielding, equal ctx? %s\n", co_ctx == cb_data.ctx ? "yes" : "no");
+	(void)co_ctx; 
+	DPRINTF("yielding, equal ctx? %s\n", co_ctx == cb_data.ctx ? "yes" : "no");
 	do {
 		qemu_coroutine_yield();
 	} while (cb_data.ret == -EINPROGRESS);
-	fprintf(stderr, "done yielding, ret=%zd\n", cb_data.ret);
+	DPRINTF("done yielding, ret=%zd\n", cb_data.ret);
 	s->stats.qd_cur--;
 
 	unsigned long expected = 0;
